@@ -1,20 +1,30 @@
 import os
 import sqlite3
 import telebot
-from flask import Flask
-from threading import Thread
+from flask import Flask, request
+import logging
+from datetime import datetime
+
+# ==================== LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # ==================== KONFIGURATSIYA ====================
-TOKEN = "8303974542:AAFRaKhS3TfWEajF0O126gPEPj6N4D8QXvc"
-ADMINS = [580240189]  # O'Z ID INGIZNI QO'YING!
+TOKEN = os.getenv('BOT_TOKEN', '8303974542:AAFRaKhS3TfWEajF0O126gPEPj6N4D8QXvc')
+ADMINS = [580240189]  # YANGILANGAN ID
 
 bot = telebot.TeleBot(TOKEN)
+WEBHOOK_URL = "https://telegram-worker-bot-rx2i.onrender.com"
 
 # ==================== DATABASE ====================
 def get_db_connection():
     conn = sqlite3.connect('workers.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     return conn
 
 def init_database():
@@ -23,13 +33,14 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS workers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tg_id INTEGER,
-            name TEXT,
-            surname TEXT,
+            tg_id INTEGER UNIQUE,
+            name TEXT NOT NULL,
+            surname TEXT NOT NULL,
             birthdate TEXT,
             position TEXT,
             organization TEXT,
-            photo_file_id TEXT
+            photo_file_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -40,247 +51,109 @@ init_database()
 # ==================== MA'LUMOTLARNI SAQLASH ====================
 user_data = {}
 
-# ==================== ADMIN BUYRUQLARI ====================
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.chat.id not in ADMINS:
-        bot.send_message(message.chat.id, "❌ Siz admin emassiz!")
-        return
-    
-    bot.send_message(message.chat.id,
-                    "👨‍💼 *Admin Panel*\n\n"
-                    "/stats - Statistika\n"
-                    "/list - Ishchilar ro'yxati\n"
-                    "/search - Qidirish\n"
-                    "/myid - ID ni ko'rish",
-                    parse_mode="Markdown")
-
-@bot.message_handler(commands=['stats'])
-def stats(message):
-    if message.chat.id not in ADMINS:
-        bot.send_message(message.chat.id, "❌ Siz admin emassiz!")
-        return
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM workers")
-        total = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT organization, COUNT(*) FROM workers GROUP BY organization")
-        org_stats = cursor.fetchall()
-        
-        stats_text = f"📊 *STATISTIKA*\n\n👥 Jami ishchilar: *{total} ta*\n\n"
-        
-        if org_stats:
-            stats_text += "🏢 *Firmalar bo'yicha:*\n"
-            for org, count in org_stats:
-                stats_text += f"• {org}: {count} ta\n"
-        else:
-            stats_text += "📭 Hali hech qanday ma'lumot yo'q\n"
-        
-        bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
+# ==================== YORDAMCHI FUNKSIYALAR ====================
+def close_db_connection(conn):
+    """Database ulanishini yopish"""
+    if conn:
         conn.close()
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Xatolik: {e}")
 
-@bot.message_handler(commands=['list'])
-def list_workers(message):
-    if message.chat.id not in ADMINS:
-        bot.send_message(message.chat.id, "❌ Siz admin emassiz!")
-        return
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT name, surname, position, organization FROM workers ORDER BY name")
-        workers = cursor.fetchall()
-        
-        if not workers:
-            bot.send_message(message.chat.id, "📭 Hali hech qanday ishchi ro'yxatdan o'tmagan.")
-            return
-        
-        workers_text = "👥 *ISHCHILAR RO'YXATI*\n\n"
-        
-        for i, (name, surname, position, org) in enumerate(workers, 1):
-            workers_text += f"{i}. *{name} {surname}*\n"
-            workers_text += f"   🏢 {org} | ⚒️ {position}\n\n"
-            
-            if i % 10 == 0:
-                bot.send_message(message.chat.id, workers_text, parse_mode="Markdown")
-                workers_text = ""
-        
-        if workers_text:
-            bot.send_message(message.chat.id, workers_text, parse_mode="Markdown")
-            
-        conn.close()
-            
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Xatolik: {e}")
+def is_admin(user_id):
+    """Foydalanuvchi admin yoki yo'qligini tekshirish"""
+    return user_id in ADMINS
 
-@bot.message_handler(commands=['search'])
-def search_cmd(message):
-    if message.chat.id not in ADMINS:
-        bot.send_message(message.chat.id, "❌ Siz admin emassiz!")
-        return
-    
-    msg = bot.send_message(message.chat.id, "🔍 Qidirmoqchi bo'lgan ismni yuboring:")
-    bot.register_next_step_handler(msg, process_search)
-
-def process_search(message):
-    if message.chat.id not in ADMINS:
-        return
-    
-    search_term = message.text
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT name, surname, position, organization FROM workers WHERE name LIKE ? OR surname LIKE ? OR organization LIKE ?", 
-                      (f'%{search_term}%', f'%{search_term}%', f'%{search_term}%'))
-        workers = cursor.fetchall()
-        
-        if not workers:
-            bot.send_message(message.chat.id, f"❌ '{search_term}' bo'yicha hech narsa topilmadi.")
-            return
-        
-        result_text = f"🔍 *'{search_term}' bo'yicha topildi ({len(workers)} ta):*\n\n"
-        
-        for i, (name, surname, position, org) in enumerate(workers, 1):
-            result_text += f"{i}. *{name} {surname}*\n"
-            result_text += f"   🏢 {org} | ⚒️ {position}\n\n"
-        
-        bot.send_message(message.chat.id, result_text, parse_mode="Markdown")
-        conn.close()
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Xatolik: {e}")
-
-@bot.message_handler(commands=['myid'])
-def my_id(message):
-    bot.send_message(message.chat.id, f"🆔 Sizning ID ingiz: `{message.chat.id}`", parse_mode="Markdown")
-
-# ==================== FOYDALANUVCHI BUYRUQLARI ====================
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.chat.id
-    
-    if user_id in ADMINS:
-        admin_panel(message)
-        return
-    
-    user_data[user_id] = {'step': 'name'}
-    bot.send_message(user_id, "👋 *Xush kelibsiz!*\n\nIsmingizni kiriting:", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'name')
-def get_name(message):
-    user_id = message.chat.id
-    user_data[user_id]['name'] = message.text
-    user_data[user_id]['step'] = 'surname'
-    bot.send_message(user_id, "✅ *Ism qabul qilindi!*\n\nFamiliyangizni kiriting:", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'surname')
-def get_surname(message):
-    user_id = message.chat.id
-    user_data[user_id]['surname'] = message.text
-    user_data[user_id]['step'] = 'birthdate'
-    bot.send_message(user_id, "✅ *Familiya qabul qilindi!*\n\nTug'ilgan sanangiz (kun/oy/yil):", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'birthdate')
-def get_birthdate(message):
-    user_id = message.chat.id
-    user_data[user_id]['birthdate'] = message.text
-    user_data[user_id]['step'] = 'position'
-    bot.send_message(user_id, "✅ *Sana qabul qilindi!*\n\nLavozimingizni kiriting:", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'position')
-def get_position(message):
-    user_id = message.chat.id
-    user_data[user_id]['position'] = message.text
-    user_data[user_id]['step'] = 'organization'
-    bot.send_message(user_id, "✅ *Lavozim qabul qilindi!*\n\n🏢 *Qaysi firmada ishlaysiz?* Firma nomini kiriting:", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'organization')
-def get_organization(message):
-    user_id = message.chat.id
-    user_data[user_id]['organization'] = message.text
-    user_data[user_id]['step'] = 'photo'
-    bot.send_message(user_id, f"✅ *Firma qabul qilindi: {message.text}*\n\n📸 *Endi selfi yuboring:*", parse_mode="Markdown")
-
-@bot.message_handler(content_types=['photo'], func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'photo')
-def get_photo(message):
-    user_id = message.chat.id
-    photo_id = message.photo[-1].file_id
-    user_data[user_id]['photo_file_id'] = photo_id
-    user_data[user_id]['step'] = 'confirm'
-    
-    data = user_data[user_id]
-    confirm_text = f"""
-📋 *MA'LUMOTLARINGIZNI TASDIQLANG*
-
-👤 Ism: {data['name']}
-👤 Familiya: {data['surname']}  
-📅 Sana: {data['birthdate']}
-⚒️ Lavozim: {data['position']}
-🏢 Tashkilot: {data['organization']}
-
-*Barcha ma'lumotlar to'g'rimi?*
-"""
-    
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add('✅ Ha, tasdiqlayman', '❌ Yoq, qaytadan')
-    
-    try:
-        bot.send_photo(user_id, photo_id, caption=confirm_text, reply_markup=markup, parse_mode="Markdown")
-    except:
-        bot.send_message(user_id, confirm_text, reply_markup=markup, parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: message.chat.id in user_data and user_data[message.chat.id]['step'] == 'confirm')
-def confirm_data(message):
-    user_id = message.chat.id
-    
-    if message.text == '✅ Ha, tasdiqlayman':
-        try:
-            data = user_data[user_id]
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO workers (tg_id, name, surname, birthdate, position, organization, photo_file_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, data['name'], data['surname'], data['birthdate'], data['position'], data['organization'], data['photo_file_id']))
-            conn.commit()
-            conn.close()
-            
-            bot.send_message(user_id, "✅ *Ma'lumotlar saqlandi!* 🎉", reply_markup=telebot.types.ReplyKeyboardRemove())
-            del user_data[user_id]
-            
-        except Exception as e:
-            bot.send_message(user_id, f"❌ Saqlashda xatolik: {e}")
-        
-    elif message.text == '❌ Yoq, qaytadan':
-        user_data[user_id] = {'step': 'name'}
-        bot.send_message(user_id, "🔄 *Qaytadan boshlaymiz!*\n\nIsmingizni kiriting:", 
-                        reply_markup=telebot.types.ReplyKeyboardRemove())
-
-# ==================== WEB SERVER ====================
+# ==================== WEBHOOK ====================
 @app.route('/')
 def home():
     return "🤖 Telegram Bot ishlayapti! ✅"
 
-def run_bot():
-    print("🤖 Bot ishga tushdi...")
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"Bot xatosi: {e}")
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        try:
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            return ''
+        except Exception as e:
+            logger.error(f"Webhook xatosi: {e}")
+            return 'Internal Server Error', 500
+    else:
+        return 'Bad request', 400
 
-if __name__ == "__main__":
-    t = Thread(target=run_bot)
-    t.daemon = True
-    t.start()
-    app.run(host='0.0.0.0', port=10000)
+# ==================== ADMIN BUYRUQLARI ====================
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Siz admin emassiz!")
+        return
+    
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add('/stats', '/list')
+    markup.add('/search', '/myid')
+    markup.add('/restart')
+    
+    bot.send_message(
+        message.chat.id,
+        "👨‍💼 *Admin Panel*\n\n"
+        "/stats - Statistika\n"
+        "/list - Ishchilar ro'yxati\n"
+        "/search - Qidirish\n"
+        "/myid - ID ni ko'rish\n"
+        "/restart - Webhook ni yangilash",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+@bot.message_handler(commands=['restart'])
+def restart_webhook(message):
+    if not is_admin(message.chat.id):
+        return
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        bot.send_message(message.chat.id, "✅ Webhook yangilandi!")
+    except Exception as e:
+        logger.error(f"Webhook yangilash xatosi: {e}")
+        bot.send_message(message.chat.id, f"❌ Xatolik: {e}")
+
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    if not is_admin(message.chat.id):
+        return
+    
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # Jami ishchilar soni
+        cursor.execute("SELECT COUNT(*) FROM workers")
+        total_workers = cursor.fetchone()[0]
+        
+        # Oxirgi qo'shilgan ishchi
+        cursor.execute("SELECT name, surname, created_at FROM workers ORDER BY id DESC LIMIT 1")
+        last_worker = cursor.fetchone()
+        
+        stats_text = f"📊 *Statistika*\n\n"
+        stats_text += f"👥 Jami ishchilar: *{total_workers}*\n"
+        
+        if last_worker:
+            stats_text += f"🆕 Oxirgi qo'shilgan: *{last_worker['name']} {last_worker['surname']}*\n"
+            stats_text += f"📅 Sana: *{last_worker['created_at']}*"
+        
+        bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Statistika xatosi: {e}")
+        bot.send_message(message.chat.id, "❌ Statistika olishda xatolik!")
+    finally:
+        close_db_connection(conn)
+
+@bot.message_handler(commands=['list'])
+def list_workers(message):
+    if not is_admin(message.chat.id):
+        return
+    
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT tg_id, name, surname, position, photo_file_id FROM workers ORDER BY id DESC LIMIT 10
