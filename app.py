@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 # ==================== KONFIGURATSIYA ====================
 TOKEN = "8303974542:AAFRaKhS3TfWEajF0O126gPEPj6N4D8QXvc"
-ADMINS = [123456789]  # O'Z ID INGIZNI QO'YING!
+ADMINS = [580240189]  # O'Z ID INGIZNI QO'YING!
 
 bot = telebot.TeleBot(TOKEN)
 
